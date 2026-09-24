@@ -51,19 +51,18 @@ def extract_beats(record_ids=None, window=187, max_per_class=15000, seed=42):
 if left < 0 or right > len(signal):
     continue
 
-beat = signal[left:right]
-if len(beat) != window:
-    continue
+        beat = signal[left:right]
+        if len(beat) != window:
+            continue
 
-label = 0 if symbol in NORMAL_SYMBOLS else 1
-X.append(beat)
-y.append(label)
-groups.append(rid)
+        label = 0 if symbol in NORMAL_SYMBOLS else 1
+        X.append(beat)
+        y.append(label)
+        groups.append(rid)
 
     X = np.asarray(X, dtype=np.float32)
     y = np.asarray(y, dtype=np.int64)
     groups = np.asarray(groups)
-
     # Cap each class to keep demo training practical.
     selected = []
     for cls in [0, 1]:
