@@ -12,7 +12,7 @@ def signal_quality_score(x, fs=360):
         return 0.0
 
     f, pxx = welch(x, fs=fs, nperseg=min(128, len(x)))
-    total = np.trapz(pxx, f) + 1e-12
+    total = np.trapezoid(pxx, f) + 1e-12
     baseline = np.trapz(pxx[f < 0.5], f[f < 0.5])
     high = np.trapz(pxx[f > 40], f[f > 40])
 
