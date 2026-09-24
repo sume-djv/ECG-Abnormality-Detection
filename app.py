@@ -5,9 +5,6 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
-import tensorflow as tf
-
-from sklearn.metrics import roc_curve, auc
 
 from src.utils import signal_quality_score, interpretation
 
@@ -19,7 +16,7 @@ from src.utils import signal_quality_score, interpretation
 ART = Path("artifacts")
 
 st.set_page_config(
-    page_title="ECG Abnormality Detection",
+    page_title="ECG AI Analyzer",
     page_icon="🫀",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -27,257 +24,385 @@ st.set_page_config(
 
 
 # ============================================================
-# CUSTOM CSS
+# CUSTOM THEME
 # ============================================================
 
-st.markdown(
-    """
-    <style>
+if "theme" not in st.session_state:
+    st.session_state.theme = "Light"
 
-    .main-title {
-        font-size: 42px;
-        font-weight: 700;
-        margin-bottom: 0;
-    }
 
-    .subtitle {
-        font-size: 17px;
-        color: #6b7280;
-        margin-top: 5px;
-    }
-
-    .section-title {
-        font-size: 25px;
-        font-weight: 650;
-        margin-top: 25px;
-    }
-
-    .status-box {
-        padding: 14px 18px;
-        border-radius: 10px;
-        background-color: #f3f4f6;
-        margin-top: 10px;
-        margin-bottom: 15px;
-    }
-
-    .disclaimer {
-        padding: 14px 18px;
-        border-radius: 8px;
-        background-color: #fff7ed;
-        border-left: 5px solid #f97316;
-        margin-top: 25px;
-    }
-
-    </style>
-    """,
-    unsafe_allow_html=True,
+theme = st.sidebar.radio(
+    "🎨 Appearance",
+    ["Light", "Dark"],
+    index=0 if st.session_state.theme == "Light" else 1,
 )
 
+st.session_state.theme = theme
+
+
+if theme == "Dark":
+
+    st.markdown(
+        """
+        <style>
+
+        .stApp {
+            background-color: #0b1220;
+            color: #e5e7eb;
+        }
+
+        [data-testid="stSidebar"] {
+            background-color: #111827;
+        }
+
+        [data-testid="stSidebar"] * {
+            color: #e5e7eb !important;
+        }
+
+        h1, h2, h3, h4, h5, p, label {
+            color: #e5e7eb !important;
+        }
+
+        .metric-card {
+            background: #111827;
+            border: 1px solid #263244;
+            color: #e5e7eb;
+        }
+
+        .feature-card {
+            background: #111827;
+            border: 1px solid #263244;
+            color: #e5e7eb;
+        }
+
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+else:
+
+    st.markdown(
+        """
+        <style>
+
+        .stApp {
+            background-color: #f7f9fc;
+        }
+
+        .metric-card {
+            background: white;
+            border: 1px solid #e3e8f0;
+            color: #172033;
+        }
+
+        .feature-card {
+            background: white;
+            border: 1px solid #e3e8f0;
+            color: #172033;
+        }
+
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
 
 # ============================================================
-# HEADER
+# LOAD MODEL + ARTIFACTS
 # ============================================================
 
-st.markdown(
-    '<div class="main-title">🫀 ECG Abnormality Detection</div>',
-    unsafe_allow_html=True,
-)
-
-st.markdown(
-    '<div class="subtitle">'
-    "AI-based ECG classification benchmark using the MIT-BIH Arrhythmia Database"
-    "</div>",
-    unsafe_allow_html=True,
-)
-
-st.write("")
+MODEL_PATH = ART / "ecg_cnn.keras"
+METRICS_PATH = ART / "metrics.json"
+TEST_PATH = ART / "test_samples.npz"
 
 
-# ============================================================
-# LOAD MODEL
-# ============================================================
-
-if not (ART / "ecg_cnn.keras").exists():
+if not MODEL_PATH.exists():
     st.error(
-        "Model artifacts are not available. "
-        "Please run `python train.py` first."
+        "⚠️ Model file is missing. Please run `python train.py` first."
     )
     st.stop()
 
 
+if not METRICS_PATH.exists():
+    st.error(
+        "⚠️ Metrics file is missing. Please run `python train.py` first."
+    )
+    st.stop()
+
+
+if not TEST_PATH.exists():
+    st.error(
+        "⚠️ Test sample file is missing. Please run `python train.py` first."
+    )
+    st.stop()
+
+
+import tensorflow as tf
+
+
 @st.cache_resource
-def load_ecg_model():
+def load_model():
+
     return tf.keras.models.load_model(
-        ART / "ecg_cnn.keras"
+        MODEL_PATH
     )
 
 
-model = load_ecg_model()
+@st.cache_data
+def load_project_data():
+
+    with open(
+        METRICS_PATH,
+        encoding="utf-8"
+    ) as f:
+
+        metrics = json.load(f)
+
+    data = np.load(TEST_PATH)
+
+    X = data["X"]
+    y = data["y"]
+
+    return metrics, X, y
+
+
+model = load_model()
+
+metrics, X, y = load_project_data()
 
 
 # ============================================================
-# LOAD METRICS
+# HELPER FUNCTIONS
 # ============================================================
 
-with open(ART / "metrics.json") as f:
-    metrics = json.load(f)
+def prepare_signal(signal):
+
+    signal = np.asarray(
+        signal,
+        dtype=np.float32
+    ).reshape(-1)
+
+    if len(signal) != 187:
+
+        old_axis = np.linspace(
+            0,
+            1,
+            len(signal)
+        )
+
+        new_axis = np.linspace(
+            0,
+            1,
+            187
+        )
+
+        signal = np.interp(
+            new_axis,
+            old_axis,
+            signal
+        ).astype(np.float32)
+
+    signal = signal - signal.mean()
+
+    signal = signal / (
+        signal.std() + 1e-7
+    )
+
+    return signal
 
 
-# ============================================================
-# LOAD TEST DATA
-# ============================================================
+def predict_signal(signal):
 
-data = np.load(
-    ART / "test_samples.npz"
-)
+    signal = prepare_signal(signal)
 
-X = data["X"]
-y = data["y"]
+    probability = float(
+        model.predict(
+            signal[None, :, None],
+            verbose=0
+        )[0, 0]
+    )
 
-if "prob" in data.files:
-    stored_prob = data["prob"]
-else:
-    stored_prob = model.predict(
-        X,
-        verbose=0
-    ).ravel()
+    quality = float(
+        signal_quality_score(signal)
+    )
+
+    label = (
+        "Abnormal"
+        if probability >= 0.5
+        else "Normal"
+    )
+
+    confidence = max(
+        probability,
+        1 - probability
+    )
+
+    return (
+        signal,
+        probability,
+        quality,
+        label,
+        confidence
+    )
+
+
+def quality_status(score):
+
+    if score >= 0.85:
+
+        return "Good", "🟢"
+
+    elif score >= 0.65:
+
+        return "Fair", "🟡"
+
+    else:
+
+        return "Low", "🔴"
+
+
+def metric_card(
+    title,
+    value,
+    subtitle=""
+):
+
+    st.markdown(
+        f"""
+        <div class="metric-card"
+             style="
+             padding:18px;
+             border-radius:16px;
+             text-align:center;
+             margin-bottom:10px;
+             box-shadow:0 4px 15px rgba(0,0,0,0.05);
+             ">
+
+            <div style="
+                font-size:12px;
+                font-weight:700;
+                letter-spacing:0.05em;
+            ">
+                {title}
+            </div>
+
+            <div style="
+                font-size:30px;
+                font-weight:800;
+                margin:7px 0;
+            ">
+                {value}
+            </div>
+
+            <div style="
+                font-size:13px;
+                opacity:0.7;
+            ">
+                {subtitle}
+            </div>
+
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+def plot_ecg(
+    signal,
+    title="ECG Signal",
+    noisy_signal=None
+):
+
+    fig, ax = plt.subplots(
+        figsize=(12, 4)
+    )
+
+    ax.plot(
+        signal,
+        linewidth=1.7,
+        label="ECG signal"
+    )
+
+    if noisy_signal is not None:
+
+        ax.plot(
+            noisy_signal,
+            linewidth=1,
+            alpha=0.55,
+            label="Noisy signal"
+        )
+
+    ax.axvline(
+        len(signal) // 2,
+        linestyle="--",
+        linewidth=1.2,
+        label="Reference position"
+    )
+
+    ax.set_title(
+        title,
+        fontsize=14,
+        fontweight="bold"
+    )
+
+    ax.set_xlabel(
+        "Sample"
+    )
+
+    ax.set_ylabel(
+        "Normalized amplitude"
+    )
+
+    ax.grid(
+        alpha=0.2
+    )
+
+    ax.legend()
+
+    fig.tight_layout()
+
+    return fig
 
 
 # ============================================================
 # SIDEBAR
 # ============================================================
 
-st.sidebar.title("🧪 ECG Analysis")
+st.sidebar.title(
+    "🫀 ECG AI Analyzer"
+)
 
-mode = st.sidebar.radio(
-    "Input mode",
+st.sidebar.caption(
+    "Interactive ECG abnormality classification benchmark"
+)
+
+st.sidebar.divider()
+
+
+input_mode = st.sidebar.radio(
+    "📥 Input Mode",
     [
         "Test Dataset Sample",
         "Upload ECG CSV",
-    ],
+        "Noise Stress Test"
+    ]
 )
 
 
-# ============================================================
-# DATASET SAMPLE MODE
-# ============================================================
-
-if mode == "Test Dataset Sample":
-
-    st.sidebar.markdown("---")
-
-    i = st.sidebar.slider(
-        "Select test sample",
-        min_value=0,
-        max_value=len(X) - 1,
-        value=0,
-    )
-
-    signal = X[i].squeeze()
-
-    sample_source = f"MIT-BIH test sample #{i}"
+st.sidebar.divider()
 
 
-# ============================================================
-# CSV UPLOAD MODE
-# ============================================================
-
-else:
-
-    st.sidebar.markdown("---")
-
-    uploaded_file = st.sidebar.file_uploader(
-        "Upload ECG signal CSV",
-        type=["csv"],
-        help="Upload a CSV containing ECG signal values.",
-    )
-
-    if uploaded_file is None:
-
-        st.info(
-            "👈 Upload an ECG CSV file from the sidebar "
-            "to analyze a custom signal."
-        )
-
-        st.stop()
-
-    try:
-
-        df = pd.read_csv(
-            uploaded_file,
-            header=None,
-        )
-
-        numeric_values = pd.to_numeric(
-            df.iloc[:, 0],
-            errors="coerce",
-        ).dropna().to_numpy(
-            dtype=np.float32
-        )
-
-        if len(numeric_values) < 2:
-            st.error(
-                "The uploaded CSV does not contain enough "
-                "numeric ECG samples."
-            )
-            st.stop()
-
-        original_length = len(numeric_values)
-
-        # Resample to 187 points expected by the CNN
-        original_axis = np.linspace(
-            0,
-            1,
-            original_length,
-        )
-
-        target_axis = np.linspace(
-            0,
-            1,
-            187,
-        )
-
-        signal = np.interp(
-            target_axis,
-            original_axis,
-            numeric_values,
-        ).astype(np.float32)
-
-        # Normalize uploaded signal
-        signal = (
-            signal - signal.mean()
-        ) / (
-            signal.std() + 1e-7
-        )
-
-        sample_source = (
-            f"Uploaded ECG "
-            f"({original_length} samples → 187)"
-        )
-
-    except Exception as e:
-
-        st.error(
-            f"Could not read the uploaded CSV: {e}"
-        )
-
-        st.stop()
-
-
-# ============================================================
-# SIDEBAR PROJECT INFORMATION
-# ============================================================
-
-st.sidebar.markdown("---")
-
-st.sidebar.subheader("📚 Project Information")
+st.sidebar.markdown(
+    "### 📌 Project Information"
+)
 
 st.sidebar.write(
     "**Dataset:** MIT-BIH Arrhythmia Database"
 )
 
 st.sidebar.write(
-    "**Task:** Binary ECG classification"
+    "**Task:** Binary ECG Classification"
 )
 
 st.sidebar.write(
@@ -292,485 +417,808 @@ st.sidebar.write(
     "**Model:** 1D CNN"
 )
 
-st.sidebar.markdown("---")
 
-st.sidebar.caption(
-    "Research and educational demonstration only."
+# ============================================================
+# MAIN HEADER
+# ============================================================
+
+st.title(
+    "🫀 ECG AI Analyzer"
+)
+
+st.caption(
+    "AI-powered ECG waveform classification with "
+    "signal-quality awareness."
+)
+
+st.warning(
+    "⚠️ Research/educational benchmark only — "
+    "not a clinical diagnosis system."
 )
 
 
 # ============================================================
-# PREDICTION
+# TABS
 # ============================================================
 
-prob = float(
-    model.predict(
-        signal[None, :, None],
-        verbose=0,
-    )[0, 0]
-)
-
-quality = signal_quality_score(
-    signal
-)
-
-label = (
-    "Abnormal"
-    if prob >= 0.5
-    else "Normal"
-)
-
-confidence = max(
-    prob,
-    1 - prob,
-)
-
-
-# ============================================================
-# QUALITY STATUS
-# ============================================================
-
-if quality >= 0.80:
-    quality_status = "Good 🟢"
-
-elif quality >= 0.60:
-    quality_status = "Moderate 🟡"
-
-else:
-    quality_status = "Low 🔴"
-
-
-prediction_icon = (
-    "🔴"
-    if label == "Abnormal"
-    else "🟢"
-)
-
-
-# ============================================================
-# PREDICTION SECTION
-# ============================================================
-
-st.markdown(
-    '<div class="section-title">🔍 ECG Prediction</div>',
-    unsafe_allow_html=True,
-)
-
-c1, c2, c3, c4 = st.columns(4)
-
-c1.metric(
-    "Prediction",
-    f"{prediction_icon} {label}",
-)
-
-c2.metric(
-    "Abnormal Probability",
-    f"{prob:.1%}",
-)
-
-c3.metric(
-    "Model Confidence",
-    f"{confidence:.1%}",
-)
-
-c4.metric(
-    "Signal Quality",
-    f"{quality:.1%}",
-)
-
-
-st.markdown(
-    f"""
-    <div class="status-box">
-    <b>Input:</b> {sample_source}
-    &nbsp; | &nbsp;
-    <b>Prediction:</b> {label}
-    &nbsp; | &nbsp;
-    <b>Signal quality:</b> {quality_status}
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-
-# ============================================================
-# ECG WAVEFORM
-# ============================================================
-
-st.markdown(
-    '<div class="section-title">📈 ECG Waveform</div>',
-    unsafe_allow_html=True,
-)
-
-fig, ax = plt.subplots(
-    figsize=(13, 4)
-)
-
-ax.plot(
-    signal,
-    linewidth=1.4,
-)
-
-ax.axvline(
-    len(signal) // 2,
-    linestyle="--",
-    linewidth=1,
-    label="Reference position",
-)
-
-ax.set_xlabel(
-    "Sample"
-)
-
-ax.set_ylabel(
-    "Normalized amplitude"
-)
-
-ax.set_title(
-    "ECG Signal"
-)
-
-ax.grid(
-    alpha=0.2
-)
-
-ax.legend()
-
-st.pyplot(
-    fig,
-    clear_figure=True,
-)
-
-
-# ============================================================
-# INTERPRETATION
-# ============================================================
-
-st.markdown(
-    '<div class="section-title">🧠 Model Interpretation</div>',
-    unsafe_allow_html=True,
-)
-
-st.info(
-    interpretation(
-        prob,
-        quality,
-    )
-)
-
-
-# ============================================================
-# MODEL PERFORMANCE
-# ============================================================
-
-st.markdown(
-    '<div class="section-title">📊 Model Performance</div>',
-    unsafe_allow_html=True,
-)
-
-m1, m2, m3, m4, m5 = st.columns(5)
-
-m1.metric(
-    "Accuracy",
-    f"{metrics['accuracy']:.3f}",
-)
-
-m2.metric(
-    "Precision",
-    f"{metrics['precision']:.3f}",
-)
-
-m3.metric(
-    "Recall",
-    f"{metrics['recall']:.3f}",
-)
-
-m4.metric(
-    "F1 Score",
-    f"{metrics['f1']:.3f}",
-)
-
-m5.metric(
-    "ROC-AUC",
-    f"{metrics['roc_auc']:.3f}",
-)
-
-
-# ============================================================
-# ANALYTICS TABS
-# ============================================================
-
-tab1, tab2, tab3, tab4 = st.tabs(
+tab1, tab2, tab3 = st.tabs(
     [
-        "📊 Confusion Matrix",
-        "📈 ROC Curve",
-        "📋 Classification Report",
-        "📚 Dataset & Model",
+        "🔎 ECG Analyzer",
+        "📊 Model Performance",
+        "ℹ️ About Project"
     ]
 )
 
 
 # ============================================================
-# CONFUSION MATRIX
+# TAB 1 — ECG ANALYZER
 # ============================================================
 
 with tab1:
 
-    cm = np.array(
-        metrics["confusion_matrix"]
-    )
+    # --------------------------------------------------------
+    # TEST DATASET SAMPLE
+    # --------------------------------------------------------
 
-    fig2, ax2 = plt.subplots(
-        figsize=(6, 5)
-    )
+    if input_mode == "Test Dataset Sample":
 
-    ax2.imshow(cm)
+        st.sidebar.subheader(
+            "🧪 Test Sample"
+        )
 
-    ax2.set_xticks(
-        [0, 1],
-        ["Normal", "Abnormal"],
-    )
+        sample_index = st.sidebar.slider(
+            "Select ECG sample",
+            0,
+            len(X) - 1,
+            0
+        )
 
-    ax2.set_yticks(
-        [0, 1],
-        ["Normal", "Abnormal"],
-    )
 
-    ax2.set_xlabel(
-        "Predicted"
-    )
+        signal = X[
+            sample_index
+        ].squeeze().astype(
+            np.float32
+        )
 
-    ax2.set_ylabel(
-        "Actual"
-    )
 
-    ax2.set_title(
-        "Confusion Matrix"
-    )
+        (
+            signal,
+            probability,
+            quality,
+            prediction,
+            confidence
+        ) = predict_signal(signal)
 
-    for r in range(2):
 
-        for c in range(2):
+        ground_truth = (
+            "Abnormal"
+            if int(y[sample_index]) == 1
+            else "Normal"
+        )
 
-            ax2.text(
-                c,
-                r,
-                cm[r, c],
-                ha="center",
-                va="center",
-                fontsize=14,
-                fontweight="bold",
+
+        quality_text, quality_icon = (
+            quality_status(quality)
+        )
+
+
+        is_match = (
+            prediction == ground_truth
+        )
+
+
+        # ----------------------------------------------------
+        # RESULT HEADER
+        # ----------------------------------------------------
+
+        st.markdown(
+            "### 🔎 ECG Prediction"
+        )
+
+
+        c1, c2, c3, c4 = st.columns(4)
+
+
+        with c1:
+
+            icon = (
+                "🟢"
+                if prediction == "Normal"
+                else "🔴"
             )
 
-    st.pyplot(
-        fig2,
-        clear_figure=True,
-    )
+            metric_card(
+                "PREDICTION",
+                f"{icon} {prediction}",
+                f"Ground truth: {ground_truth}"
+            )
+
+
+        with c2:
+
+            metric_card(
+                "ABNORMAL PROBABILITY",
+                f"{probability:.1%}",
+                "Model output"
+            )
+
+
+        with c3:
+
+            metric_card(
+                "MODEL CONFIDENCE",
+                f"{confidence:.1%}",
+                "Prediction certainty"
+            )
+
+
+        with c4:
+
+            metric_card(
+                "SIGNAL QUALITY",
+                f"{quality:.1%}",
+                f"{quality_icon} {quality_text}"
+            )
+
+
+        # ----------------------------------------------------
+        # SAMPLE STATUS
+        # ----------------------------------------------------
+
+        status_text = (
+            "✅ Prediction matches ground truth"
+            if is_match
+            else "⚠️ Prediction differs from ground truth"
+        )
+
+
+        st.markdown(
+            f"""
+            <div class="feature-card"
+                 style="
+                 padding:15px 20px;
+                 border-radius:14px;
+                 margin:15px 0;
+                 ">
+
+                <b>📋 Test Sample #{sample_index}</b>
+
+                &nbsp; | &nbsp;
+
+                Prediction:
+                <b>{prediction}</b>
+
+                &nbsp; | &nbsp;
+
+                Ground Truth:
+                <b>{ground_truth}</b>
+
+                &nbsp; | &nbsp;
+
+                {status_text}
+
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+
+        # ----------------------------------------------------
+        # WAVEFORM
+        # ----------------------------------------------------
+
+        st.markdown(
+            "### 📈 ECG Waveform"
+        )
+
+
+        st.pyplot(
+            plot_ecg(
+                signal,
+                f"ECG Sample #{sample_index}"
+            ),
+            clear_figure=True
+        )
+
+
+        # ----------------------------------------------------
+        # NOVEL FEATURE 1
+        # ----------------------------------------------------
+
+        st.markdown(
+            "### ✨ Novel Feature 1 — Signal Quality–Aware Prediction"
+        )
+
+
+        st.info(
+            "The dashboard presents model confidence together "
+            "with a heuristic ECG signal-quality score based "
+            "on baseline-wander and high-frequency-noise energy."
+        )
+
+
+        # ----------------------------------------------------
+        # NOVEL FEATURE 2
+        # ----------------------------------------------------
+
+        st.markdown(
+            "### ✨ Novel Feature 2 — Confidence + Quality Interpretation"
+        )
+
+
+        interpretation_text = interpretation(
+            probability,
+            quality
+        )
+
+
+        st.success(
+            interpretation_text
+        )
+
+
+    # ========================================================
+    # CSV UPLOAD
+    # ========================================================
+
+    elif input_mode == "Upload ECG CSV":
+
+        st.markdown(
+            "### 📤 Upload ECG CSV"
+        )
+
+
+        st.write(
+            "Upload a CSV containing numeric ECG samples. "
+            "The first numeric column will be used."
+        )
+
+
+        uploaded_file = st.file_uploader(
+            "Choose ECG CSV",
+            type=["csv"]
+        )
+
+
+        if uploaded_file is None:
+
+            st.info(
+                "📄 No CSV selected yet."
+            )
+
+
+        else:
+
+            try:
+
+                dataframe = pd.read_csv(
+                    uploaded_file
+                )
+
+
+                numeric_columns = dataframe.select_dtypes(
+                    include=np.number
+                )
+
+
+                if numeric_columns.empty:
+
+                    st.error(
+                        "❌ No numeric ECG column was found."
+                    )
+
+
+                else:
+
+                    raw_signal = (
+                        numeric_columns
+                        .iloc[:, 0]
+                        .dropna()
+                        .to_numpy(
+                            dtype=np.float32
+                        )
+                    )
+
+
+                    (
+                        signal,
+                        probability,
+                        quality,
+                        prediction,
+                        confidence
+                    ) = predict_signal(
+                        raw_signal
+                    )
+
+
+                    quality_text, quality_icon = (
+                        quality_status(
+                            quality
+                        )
+                    )
+
+
+                    c1, c2, c3, c4 = (
+                        st.columns(4)
+                    )
+
+
+                    with c1:
+
+                        icon = (
+                            "🟢"
+                            if prediction == "Normal"
+                            else "🔴"
+                        )
+
+                        metric_card(
+                            "PREDICTION",
+                            f"{icon} {prediction}",
+                            "Uploaded ECG"
+                        )
+
+
+                    with c2:
+
+                        metric_card(
+                            "ABNORMAL PROBABILITY",
+                            f"{probability:.1%}",
+                            "Model output"
+                        )
+
+
+                    with c3:
+
+                        metric_card(
+                            "MODEL CONFIDENCE",
+                            f"{confidence:.1%}",
+                            "Prediction certainty"
+                        )
+
+
+                    with c4:
+
+                        metric_card(
+                            "SIGNAL QUALITY",
+                            f"{quality:.1%}",
+                            f"{quality_icon} {quality_text}"
+                        )
+
+
+                    st.markdown(
+                        "### 📈 Uploaded ECG"
+                    )
+
+
+                    st.pyplot(
+                        plot_ecg(
+                            signal,
+                            "Uploaded ECG — normalized to 187 samples"
+                        ),
+                        clear_figure=True
+                    )
+
+
+                    st.markdown(
+                        "### ✨ Novel Feature 3 — User ECG Exploration"
+                    )
+
+
+                    st.info(
+                        "The same benchmark preprocessing and "
+                        "classification pipeline can be explored "
+                        "with a user-provided numeric ECG signal."
+                    )
+
+
+            except Exception as error:
+
+                st.error(
+                    f"❌ Could not process this CSV: {error}"
+                )
+
+
+    # ========================================================
+    # NOISE STRESS TEST
+    # ========================================================
+
+    else:
+
+        st.markdown(
+            "### 🧪 Noise Stress Test"
+        )
+
+
+        st.write(
+            "Add controlled Gaussian noise to a test heartbeat "
+            "and compare signal quality and model output."
+        )
+
+
+        sample_index = st.sidebar.slider(
+            "Base ECG sample",
+            0,
+            len(X) - 1,
+            0,
+            key="noise_sample"
+        )
+
+
+        noise_level = st.sidebar.slider(
+            "Noise level",
+            0.00,
+            1.00,
+            0.15,
+            0.01
+        )
+
+
+        clean_signal, clean_probability, clean_quality, clean_prediction, clean_confidence = (
+            predict_signal(
+                X[sample_index].squeeze()
+            )
+        )
+
+
+        rng = np.random.default_rng(
+            42 + sample_index +
+            int(noise_level * 1000)
+        )
+
+
+        noisy_raw = (
+            clean_signal
+            +
+            rng.normal(
+                0,
+                noise_level,
+                clean_signal.shape
+            ).astype(np.float32)
+        )
+
+
+        noisy_signal, noisy_probability, noisy_quality, noisy_prediction, noisy_confidence = (
+            predict_signal(
+                noisy_raw
+            )
+        )
+
+
+        st.markdown(
+            "### ✨ Novel Feature 4 — Noise Stress Test"
+        )
+
+
+        a, b = st.columns(2)
+
+
+        with a:
+
+            metric_card(
+                "CLEAN SIGNAL",
+                clean_prediction,
+                f"Quality {clean_quality:.1%} • Confidence {clean_confidence:.1%}"
+            )
+
+
+        with b:
+
+            metric_card(
+                "NOISY SIGNAL",
+                noisy_prediction,
+                f"Quality {noisy_quality:.1%} • Confidence {noisy_confidence:.1%}"
+            )
+
+
+        st.pyplot(
+            plot_ecg(
+                clean_signal,
+                "Clean vs Noisy ECG",
+                noisy_signal=noisy_signal
+            ),
+            clear_figure=True
+        )
+
+
+        q1, q2, q3 = st.columns(3)
+
+
+        with q1:
+
+            metric_card(
+                "NOISE LEVEL",
+                f"{noise_level:.2f}",
+                "Controlled Gaussian noise"
+            )
+
+
+        with q2:
+
+            metric_card(
+                "QUALITY CHANGE",
+                f"{noisy_quality - clean_quality:+.1%}"
+            )
+
+
+        with q3:
+
+            metric_card(
+                "CONFIDENCE CHANGE",
+                f"{noisy_confidence - clean_confidence:+.1%}"
+            )
+
+
+        st.info(
+            "This is a robustness experiment. "
+            "It does not represent clinical performance "
+            "under real-world noise."
+        )
 
 
 # ============================================================
-# ROC CURVE
+# TAB 2 — MODEL PERFORMANCE
 # ============================================================
 
 with tab2:
 
-    fpr, tpr, _ = roc_curve(
-        y,
-        stored_prob,
+    st.markdown(
+        "### 📊 Model Performance Center"
     )
 
-    roc_value = auc(
-        fpr,
-        tpr,
+
+    st.caption(
+        "Metrics calculated on the held-out test records "
+        "used by the benchmark."
     )
 
-    fig3, ax3 = plt.subplots(
-        figsize=(7, 5)
+
+    m1, m2, m3, m4, m5 = (
+        st.columns(5)
     )
 
-    ax3.plot(
-        fpr,
-        tpr,
-        linewidth=2,
-        label=f"ROC-AUC = {roc_value:.3f}",
+
+    with m1:
+
+        metric_card(
+            "ACCURACY",
+            f"{metrics['accuracy']:.3f}"
+        )
+
+
+    with m2:
+
+        metric_card(
+            "PRECISION",
+            f"{metrics['precision']:.3f}"
+        )
+
+
+    with m3:
+
+        metric_card(
+            "RECALL",
+            f"{metrics['recall']:.3f}"
+        )
+
+
+    with m4:
+
+        metric_card(
+            "F1 SCORE",
+            f"{metrics['f1']:.3f}"
+        )
+
+
+    with m5:
+
+        metric_card(
+            "ROC-AUC",
+            f"{metrics['roc_auc']:.3f}"
+        )
+
+
+    # --------------------------------------------------------
+    # CONFUSION MATRIX
+    # --------------------------------------------------------
+
+    st.markdown(
+        "### 🧩 Confusion Matrix"
     )
 
-    ax3.plot(
+
+    confusion_matrix = np.array(
+        metrics["confusion_matrix"]
+    )
+
+
+    fig, ax = plt.subplots(
+        figsize=(6, 5)
+    )
+
+
+    image = ax.imshow(
+        confusion_matrix
+    )
+
+
+    ax.set_xticks(
         [0, 1],
+        ["Normal", "Abnormal"]
+    )
+
+
+    ax.set_yticks(
         [0, 1],
-        linestyle="--",
-        linewidth=1,
-        label="Random classifier",
+        ["Normal", "Abnormal"]
     )
 
-    ax3.set_xlabel(
-        "False Positive Rate"
+
+    ax.set_xlabel(
+        "Predicted"
     )
 
-    ax3.set_ylabel(
-        "True Positive Rate"
+
+    ax.set_ylabel(
+        "Actual"
     )
 
-    ax3.set_title(
-        "Receiver Operating Characteristic"
+
+    ax.set_title(
+        "Confusion Matrix",
+        fontweight="bold"
     )
 
-    ax3.grid(
-        alpha=0.2
+
+    for row in range(2):
+
+        for col in range(2):
+
+            ax.text(
+                col,
+                row,
+                int(
+                    confusion_matrix[
+                        row,
+                        col
+                    ]
+                ),
+                ha="center",
+                va="center",
+                fontsize=15,
+                fontweight="bold"
+            )
+
+
+    fig.colorbar(
+        image,
+        ax=ax
     )
 
-    ax3.legend()
+
+    fig.tight_layout()
+
 
     st.pyplot(
-        fig3,
-        clear_figure=True,
+        fig,
+        clear_figure=True
     )
+
+
+    # --------------------------------------------------------
+    # REPORT + EXPLANATION
+    # --------------------------------------------------------
+
+    col1, col2 = st.columns(2)
+
+
+    with col1:
+
+        st.markdown(
+            "### 📋 Classification Report"
+        )
+
+
+        st.code(
+            metrics[
+                "classification_report"
+            ]
+        )
+
+
+    with col2:
+
+        st.markdown(
+            "### 🧠 Metric Guide"
+        )
+
+
+        st.markdown(
+            """
+            **Accuracy**  
+            Overall fraction of correct predictions.
+
+            **Precision**  
+            How often predicted abnormal beats were actually abnormal.
+
+            **Recall**  
+            How many abnormal beats were detected.
+
+            **F1 Score**  
+            Balance between precision and recall.
+
+            **ROC-AUC**  
+            Measures ranking performance across classification thresholds.
+            """
+        )
 
 
 # ============================================================
-# CLASSIFICATION REPORT
+# TAB 3 — ABOUT
 # ============================================================
 
 with tab3:
 
-    st.code(
-        metrics["classification_report"],
-        language="text",
+    st.markdown(
+        "### ℹ️ About This Project"
+    )
+
+
+    st.markdown(
+        """
+        ## 🫀 ECG AI Analyzer
+
+        This project is an AI-based research/educational benchmark
+        for binary ECG abnormality classification.
+
+        ### Dataset
+
+        **MIT-BIH Arrhythmia Database**
+
+        ### AI Model
+
+        **1D Convolutional Neural Network (1D CNN)**
+
+        ### Input
+
+        **187 ECG samples per heartbeat**
+
+        ### Classes
+
+        🟢 Normal  
+        🔴 Abnormal
+
+        ### Implemented Dashboard Features
+
+        - 🔎 ECG test-sample explorer
+        - 📈 ECG waveform visualization
+        - ✨ Signal-quality-aware prediction
+        - ✨ Confidence + quality interpretation
+        - 📤 ECG CSV exploration
+        - 🧪 Noise stress testing
+        - 📊 Model performance center
+        - 🧩 Confusion matrix
+        - 📋 Classification report
+        - 🌗 Light / Dark theme
+        - 🎨 User-friendly dashboard design
+        """
+    )
+
+
+    st.warning(
+        "⚠️ This application is not a medical device "
+        "and must not be used for diagnosis or medical decisions."
     )
 
 
 # ============================================================
-# DATASET + MODEL INFORMATION
+# FOOTER
 # ============================================================
 
-with tab4:
+st.divider()
 
-    left, right = st.columns(2)
-
-    with left:
-
-        st.subheader(
-            "📚 Dataset"
-        )
-
-        st.write(
-            "**MIT-BIH Arrhythmia Database**"
-        )
-
-        st.write(
-            "Public ECG dataset accessed using WFDB."
-        )
-
-        st.write(
-            f"Test samples: **{len(X):,}**"
-        )
-
-        normal_count = int(
-            np.sum(y == 0)
-        )
-
-        abnormal_count = int(
-            np.sum(y == 1)
-        )
-
-        st.write(
-            f"Normal samples: **{normal_count:,}**"
-        )
-
-        st.write(
-            f"Abnormal samples: **{abnormal_count:,}**"
-        )
-
-        # Class distribution
-        labels = [
-            "Normal",
-            "Abnormal",
-        ]
-
-        counts = [
-            normal_count,
-            abnormal_count,
-        ]
-
-        fig4, ax4 = plt.subplots(
-            figsize=(6, 4)
-        )
-
-        ax4.bar(
-            labels,
-            counts,
-        )
-
-        ax4.set_ylabel(
-            "Number of samples"
-        )
-
-        ax4.set_title(
-            "Test Set Class Distribution"
-        )
-
-        for idx, value in enumerate(
-            counts
-        ):
-
-            ax4.text(
-                idx,
-                value,
-                str(value),
-                ha="center",
-                va="bottom",
-            )
-
-        st.pyplot(
-            fig4,
-            clear_figure=True,
-        )
-
-    with right:
-
-        st.subheader(
-            "🧠 Model"
-        )
-
-        st.write(
-            "**1D Convolutional Neural Network (CNN)**"
-        )
-
-        st.write(
-            "Input: 187-sample ECG beat"
-        )
-
-        st.write(
-            "Output: Normal / Abnormal"
-        )
-
-        st.write(
-            "Binary classification using sigmoid output."
-        )
-
-        st.write(
-            "Preprocessing includes per-beat normalization."
-        )
-
-
-# ============================================================
-# DISCLAIMER
-# ============================================================
-
-st.markdown(
-    """
-    <div class="disclaimer">
-    ⚠️ <b>Research / Educational Use Only</b><br><br>
-    This application is an AI classification benchmark and
-    <b>not a clinical diagnosis system</b>.
-    Predictions should not be used for medical decisions.
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
 
 st.caption(
-    "Dataset: MIT-BIH Arrhythmia Database via PhysioNet/WFDB. "
-    "Results depend on records, preprocessing, random seed "
-    "and hardware used during training."
+    "🫀 ECG AI Analyzer • MIT-BIH benchmark • "
+    "Results depend on dataset split, preprocessing, "
+    "random seed, model and hardware."
 )
