@@ -7,3 +7,4 @@ tensorflow>=2.16
 wfdb>=4.1
 streamlit>=1.38
 scipy>=1.13
+plotly>=5.24,<7
