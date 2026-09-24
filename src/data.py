@@ -55,10 +55,10 @@ beat = signal[left:right]
 if len(beat) != window:
     continue
 
-            label = 0 if symbol in NORMAL_SYMBOLS else 1
-            X.append(beat)
-            y.append(label)
-            groups.append(rid)
+label = 0 if symbol in NORMAL_SYMBOLS else 1
+X.append(beat)
+y.append(label)
+groups.append(rid)
 
     X = np.asarray(X, dtype=np.float32)
     y = np.asarray(y, dtype=np.int64)
