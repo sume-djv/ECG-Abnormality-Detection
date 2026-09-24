@@ -10,7 +10,6 @@ import tensorflow as tf
 
 from src.utils import signal_quality_score, interpretation
 
-
 # ============================================================
 # CONFIG
 # ============================================================
