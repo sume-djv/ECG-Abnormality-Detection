@@ -5,6 +5,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+import tensorflow as tf
 
 from src.utils import signal_quality_score, interpretation
 
@@ -24,84 +26,59 @@ st.set_page_config(
 
 
 # ============================================================
-# CUSTOM THEME
+# THEME
 # ============================================================
 
 if "theme" not in st.session_state:
     st.session_state.theme = "Light"
 
-
 theme = st.sidebar.radio(
-    "🎨 Appearance",
+    "🎨 Theme",
     ["Light", "Dark"],
+    horizontal=True,
     index=0 if st.session_state.theme == "Light" else 1,
 )
 
-st.session_state.theme = theme
-
-
 if theme == "Dark":
-
     st.markdown(
         """
         <style>
-
         .stApp {
             background-color: #0b1220;
             color: #e5e7eb;
         }
-
         [data-testid="stSidebar"] {
             background-color: #111827;
         }
-
         [data-testid="stSidebar"] * {
             color: #e5e7eb !important;
         }
-
         h1, h2, h3, h4, h5, p, label {
             color: #e5e7eb !important;
         }
-
-        .metric-card {
+        [data-testid="stMetric"] {
             background: #111827;
             border: 1px solid #263244;
-            color: #e5e7eb;
+            border-radius: 14px;
+            padding: 12px;
         }
-
-        .feature-card {
-            background: #111827;
-            border: 1px solid #263244;
-            color: #e5e7eb;
-        }
-
         </style>
         """,
         unsafe_allow_html=True,
     )
-
 else:
-
     st.markdown(
         """
         <style>
-
         .stApp {
             background-color: #f7f9fc;
         }
-
-        .metric-card {
-            background: white;
+        [data-testid="stMetric"] {
+            background: #ffffff;
             border: 1px solid #e3e8f0;
-            color: #172033;
+            border-radius: 14px;
+            padding: 12px;
         }
-
-        .feature-card {
-            background: white;
-            border: 1px solid #e3e8f0;
-            color: #172033;
-        }
-
         </style>
         """,
         unsafe_allow_html=True,
@@ -109,1104 +86,1011 @@ else:
 
 
 # ============================================================
-# LOAD MODEL + ARTIFACTS
+# ARTIFACTS
 # ============================================================
 
 MODEL_PATH = ART / "ecg_cnn.keras"
 METRICS_PATH = ART / "metrics.json"
 TEST_PATH = ART / "test_samples.npz"
 
-
-if not MODEL_PATH.exists():
-    st.error(
-        "⚠️ Model file is missing. Please run `python train.py` first."
-    )
-    st.stop()
-
-
-if not METRICS_PATH.exists():
-    st.error(
-        "⚠️ Metrics file is missing. Please run `python train.py` first."
-    )
-    st.stop()
-
-
-if not TEST_PATH.exists():
-    st.error(
-        "⚠️ Test sample file is missing. Please run `python train.py` first."
-    )
-    st.stop()
-
-
-import tensorflow as tf
+for path, message in [
+    (MODEL_PATH, "Model artifact is missing. Run `python train.py` first."),
+    (METRICS_PATH, "Metrics artifact is missing. Run `python train.py` first."),
+    (TEST_PATH, "Test-sample artifact is missing. Run `python train.py` first."),
+]:
+    if not path.exists():
+        st.error(f"⚠️ {message}")
+        st.stop()
 
 
 @st.cache_resource
 def load_model():
-
-    return tf.keras.models.load_model(
-        MODEL_PATH
-    )
+    return tf.keras.models.load_model(MODEL_PATH)
 
 
 @st.cache_data
 def load_project_data():
-
-    with open(
-        METRICS_PATH,
-        encoding="utf-8"
-    ) as f:
-
+    with open(METRICS_PATH, encoding="utf-8") as f:
         metrics = json.load(f)
 
     data = np.load(TEST_PATH)
-
-    X = data["X"]
-    y = data["y"]
-
-    return metrics, X, y
+    return metrics, data["X"], data["y"]
 
 
 model = load_model()
-
 metrics, X, y = load_project_data()
+
+# Stored probabilities are useful for ROC/probability plots.
+test_data = np.load(TEST_PATH)
+stored_prob = (
+    np.asarray(test_data["prob"]).reshape(-1)
+    if "prob" in test_data.files
+    else None
+)
 
 
 # ============================================================
-# HELPER FUNCTIONS
+# HELPERS
 # ============================================================
 
 def prepare_signal(signal):
+    """Convert an ECG vector to the 187-sample format used by the CNN."""
+    signal = np.asarray(signal, dtype=np.float32).reshape(-1)
 
-    signal = np.asarray(
-        signal,
-        dtype=np.float32
-    ).reshape(-1)
+    if signal.size == 0:
+        raise ValueError("ECG signal is empty.")
 
-    if len(signal) != 187:
-
-        old_axis = np.linspace(
-            0,
-            1,
-            len(signal)
-        )
-
-        new_axis = np.linspace(
-            0,
-            1,
-            187
-        )
-
+    if signal.size != 187:
+        old_axis = np.linspace(0, 1, signal.size)
+        new_axis = np.linspace(0, 1, 187)
         signal = np.interp(
             new_axis,
             old_axis,
-            signal
+            signal,
         ).astype(np.float32)
 
     signal = signal - signal.mean()
-
-    signal = signal / (
-        signal.std() + 1e-7
-    )
+    signal = signal / (signal.std() + 1e-7)
 
     return signal
 
 
-def predict_signal(signal):
-
+def predict_signal(signal, threshold=0.50):
+    """Run the trained CNN and return probability, quality and timing."""
     signal = prepare_signal(signal)
 
     probability = float(
         model.predict(
             signal[None, :, None],
-            verbose=0
+            verbose=0,
         )[0, 0]
     )
 
-    quality = float(
-        signal_quality_score(signal)
-    )
+    quality = float(signal_quality_score(signal))
+    label = "Abnormal" if probability >= threshold else "Normal"
+    confidence = probability if label == "Abnormal" else 1 - probability
 
-    label = (
-        "Abnormal"
-        if probability >= 0.5
-        else "Normal"
-    )
-
-    confidence = max(
-        probability,
-        1 - probability
-    )
-
-    return (
-        signal,
-        probability,
-        quality,
-        label,
-        confidence
-    )
+    return signal, probability, quality, label, confidence
 
 
 def quality_status(score):
-
     if score >= 0.85:
-
         return "Good", "🟢"
-
-    elif score >= 0.65:
-
+    if score >= 0.65:
         return "Fair", "🟡"
-
-    else:
-
-        return "Low", "🔴"
+    return "Low", "🔴"
 
 
-def metric_card(
-    title,
-    value,
-    subtitle=""
-):
-
-    st.markdown(
-        f"""
-        <div class="metric-card"
-             style="
-             padding:18px;
-             border-radius:16px;
-             text-align:center;
-             margin-bottom:10px;
-             box-shadow:0 4px 15px rgba(0,0,0,0.05);
-             ">
-
-            <div style="
-                font-size:12px;
-                font-weight:700;
-                letter-spacing:0.05em;
-            ">
-                {title}
-            </div>
-
-            <div style="
-                font-size:30px;
-                font-weight:800;
-                margin:7px 0;
-            ">
-                {value}
-            </div>
-
-            <div style="
-                font-size:13px;
-                opacity:0.7;
-            ">
-                {subtitle}
-            </div>
-
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
+def probability_status(probability):
+    if probability < 0.20:
+        return "Very low abnormal probability", "🟢"
+    if probability < 0.50:
+        return "Below decision threshold", "🟡"
+    if probability < 0.80:
+        return "Elevated abnormal probability", "🟠"
+    return "High abnormal probability", "🔴"
 
 
-def plot_ecg(
+def get_indices(selection):
+    labels = np.asarray(y).reshape(-1)
+
+    if selection == "Healthy / Normal Beat":
+        return np.where(labels == 0)[0]
+
+    if selection == "Abnormal Beat":
+        return np.where(labels == 1)[0]
+
+    return np.arange(len(labels))
+
+
+def make_ecg_plotly(
     signal,
-    title="ECG Signal",
-    noisy_signal=None
+    start=0,
+    end=187,
+    show_smooth=True,
+    show_reference=True,
 ):
+    start = max(0, min(int(start), 186))
+    end = max(start + 1, min(int(end), 187))
 
-    fig, ax = plt.subplots(
-        figsize=(12, 4)
+    x = np.arange(start, end)
+    view = signal[start:end]
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=view,
+            mode="lines",
+            name="ECG waveform",
+            line=dict(width=2),
+        )
     )
 
-    ax.plot(
-        signal,
-        linewidth=1.7,
-        label="ECG signal"
-    )
+    if show_smooth:
+        window = 9
+        kernel = np.ones(window) / window
+        smoothed = np.convolve(signal, kernel, mode="same")
 
-    if noisy_signal is not None:
-
-        ax.plot(
-            noisy_signal,
-            linewidth=1,
-            alpha=0.55,
-            label="Noisy signal"
+        fig.add_trace(
+            go.Scatter(
+                x=x,
+                y=smoothed[start:end],
+                mode="lines",
+                name="Smoothed trend",
+                line=dict(width=2),
+            )
         )
 
-    ax.axvline(
-        len(signal) // 2,
-        linestyle="--",
-        linewidth=1.2,
-        label="Reference position"
+    if show_reference:
+        reference = len(signal) // 2
+
+        if start <= reference <= end:
+            fig.add_vline(
+                x=reference,
+                line_dash="dash",
+                annotation_text="Reference",
+                annotation_position="top",
+            )
+
+    if theme == "Dark":
+        plot_bg = "#111827"
+        paper_bg = "#111827"
+        text_color = "#e5e7eb"
+        grid_color = "#263244"
+    else:
+        plot_bg = "#ffffff"
+        paper_bg = "#ffffff"
+        text_color = "#172033"
+        grid_color = "#e5e7eb"
+
+    fig.update_layout(
+        title="Interactive Waveform Telemetry",
+        xaxis_title="Sample",
+        yaxis_title="Normalized amplitude",
+        hovermode="x unified",
+        dragmode="pan",
+        plot_bgcolor=plot_bg,
+        paper_bgcolor=paper_bg,
+        font=dict(color=text_color),
+        xaxis=dict(
+            gridcolor=grid_color,
+            rangeslider=dict(visible=True),
+        ),
+        yaxis=dict(gridcolor=grid_color),
+        legend=dict(orientation="h"),
+        margin=dict(l=30, r=20, t=55, b=30),
+        height=470,
     )
-
-    ax.set_title(
-        title,
-        fontsize=14,
-        fontweight="bold"
-    )
-
-    ax.set_xlabel(
-        "Sample"
-    )
-
-    ax.set_ylabel(
-        "Normalized amplitude"
-    )
-
-    ax.grid(
-        alpha=0.2
-    )
-
-    ax.legend()
-
-    fig.tight_layout()
 
     return fig
 
 
+def make_confusion_matrix():
+    return np.asarray(
+        metrics["confusion_matrix"],
+        dtype=np.int64,
+    )
+
+
+def make_roc_plot():
+    from sklearn.metrics import roc_curve, auc
+
+    if stored_prob is None or len(stored_prob) != len(y):
+        return None
+
+    fpr, tpr, _ = roc_curve(y, stored_prob)
+    score = auc(fpr, tpr)
+
+    fig, ax = plt.subplots(figsize=(6.2, 4.8))
+    ax.plot(fpr, tpr, linewidth=2, label=f"ROC-AUC = {score:.3f}")
+    ax.plot([0, 1], [0, 1], linestyle="--", linewidth=1, label="Random classifier")
+    ax.set_xlabel("False Positive Rate")
+    ax.set_ylabel("True Positive Rate")
+    ax.set_title("ROC Curve", fontweight="bold")
+    ax.grid(alpha=0.2)
+    ax.legend()
+    fig.tight_layout()
+    return fig
+
+
+def make_probability_plot():
+    if stored_prob is None or len(stored_prob) != len(y):
+        return None
+
+    normal = stored_prob[np.asarray(y) == 0]
+    abnormal = stored_prob[np.asarray(y) == 1]
+
+    fig, ax = plt.subplots(figsize=(6.2, 4.8))
+
+    ax.hist(normal, bins=25, alpha=0.65, label="Normal")
+    ax.hist(abnormal, bins=25, alpha=0.65, label="Abnormal")
+    ax.axvline(0.5, linestyle="--", linewidth=1, label="Default threshold")
+
+    ax.set_xlabel("Predicted abnormal probability")
+    ax.set_ylabel("Number of beats")
+    ax.set_title("Prediction Probability Distribution", fontweight="bold")
+    ax.grid(alpha=0.2)
+    ax.legend()
+    fig.tight_layout()
+    return fig
+
+
+def show_heartbeat_guide():
+    st.caption(
+        "Educational reference only. The trained model currently predicts "
+        "two classes: Normal and Abnormal."
+    )
+
+    c1, c2, c3 = st.columns(3)
+
+    c1.info("**P wave**\n\nTypical atrial depolarization.")
+    c2.info("**QRS complex**\n\nTypical ventricular depolarization.")
+    c3.info("**T wave**\n\nTypical ventricular repolarization.")
+
+
 # ============================================================
-# SIDEBAR
+# SIDEBAR — HEARTBEAT SELECTION
 # ============================================================
 
-st.sidebar.title(
-    "🫀 ECG AI Analyzer"
+st.sidebar.title("🫀 ECG AI Analyzer")
+st.sidebar.caption("User-friendly ECG exploration dashboard")
+
+st.sidebar.divider()
+
+st.sidebar.markdown("### 🫀 Step 1 — Select Heartbeat")
+
+heartbeat_type = st.sidebar.radio(
+    "Choose beat type",
+    [
+        "All Test Beats",
+        "Healthy / Normal Beat",
+        "Abnormal Beat",
+    ],
+)
+
+available = get_indices(heartbeat_type)
+
+if len(available) == 0:
+    st.sidebar.error("No samples available for this selection.")
+    st.stop()
+
+selected_position = st.sidebar.slider(
+    "Heartbeat",
+    0,
+    len(available) - 1,
+    0,
+)
+
+selected_index = int(
+    available[selected_position]
+)
+
+ground_truth = (
+    "Abnormal"
+    if int(y[selected_index]) == 1
+    else "Normal"
 )
 
 st.sidebar.caption(
+    f"Beat {selected_position + 1:,} of {len(available):,}"
+)
+
+st.sidebar.divider()
+
+st.sidebar.markdown("### ⚙️ Controls")
+
+analysis_mode = st.sidebar.radio(
+    "Mode",
+    [
+        "Heartbeat Checker",
+        "CSV Upload",
+        "Noise Stress Test",
+    ],
+)
+
+threshold = st.sidebar.slider(
+    "Decision threshold",
+    0.10,
+    0.90,
+    0.50,
+    0.05,
+    help="Probability at or above this value is classified as Abnormal.",
+)
+
+st.sidebar.divider()
+
+with st.sidebar.expander("🫀 Heartbeat reference"):
+    st.write("**Normal Beat:** model's Normal class.")
+    st.write("**Abnormal Beat:** all non-Normal beats in this binary benchmark.")
+    st.caption(
+        "PVC/PAC/Fusion/Paced are not separate model classes in the current trained artifact."
+    )
+
+
+# ============================================================
+# HEADER
+# ============================================================
+
+st.title("🫀 ECG AI Analyzer")
+
+st.caption(
     "Interactive ECG abnormality classification benchmark"
 )
 
-st.sidebar.divider()
-
-
-input_mode = st.sidebar.radio(
-    "📥 Input Mode",
-    [
-        "Test Dataset Sample",
-        "Upload ECG CSV",
-        "Noise Stress Test"
-    ]
-)
-
-
-st.sidebar.divider()
-
-
-st.sidebar.markdown(
-    "### 📌 Project Information"
-)
-
-st.sidebar.write(
-    "**Dataset:** MIT-BIH Arrhythmia Database"
-)
-
-st.sidebar.write(
-    "**Task:** Binary ECG Classification"
-)
-
-st.sidebar.write(
-    "**Classes:** Normal / Abnormal"
-)
-
-st.sidebar.write(
-    "**Input:** 187 ECG samples"
-)
-
-st.sidebar.write(
-    "**Model:** 1D CNN"
-)
-
-
-# ============================================================
-# MAIN HEADER
-# ============================================================
-
-st.title(
-    "🫀 ECG AI Analyzer"
-)
-
-st.caption(
-    "AI-powered ECG waveform classification with "
-    "signal-quality awareness."
-)
-
 st.warning(
-    "⚠️ Research/educational benchmark only — "
-    "not a clinical diagnosis system."
+    "⚠️ Research / educational use only — not a clinical diagnosis system."
 )
 
+top = st.columns([1, 1, 1, 1.25])
+
+top[0].metric("Dataset", "MIT-BIH")
+top[1].metric("AI Model", "1D CNN")
+top[2].metric("Input", "187 samples")
+top[3].metric("Task", "Binary ECG", "Normal / Abnormal")
+
 
 # ============================================================
-# TABS
+# MAIN TABS
 # ============================================================
 
-tab1, tab2, tab3 = st.tabs(
+tab1, tab2, tab3, tab4 = st.tabs(
     [
-        "🔎 ECG Analyzer",
-        "📊 Model Performance",
-        "ℹ️ About Project"
+        "🔎 Heartbeat Checker",
+        "📈 Interactive Waveform Telemetry",
+        "📊 Accuracy & Scorecard",
+        "ℹ️ Project Guide",
     ]
 )
 
 
 # ============================================================
-# TAB 1 — ECG ANALYZER
+# TAB 1 — HEARTBEAT CHECKER
 # ============================================================
 
 with tab1:
 
-    # --------------------------------------------------------
-    # TEST DATASET SAMPLE
-    # --------------------------------------------------------
+    if analysis_mode == "Heartbeat Checker":
 
-    if input_mode == "Test Dataset Sample":
-
-        st.sidebar.subheader(
-            "🧪 Test Sample"
+        signal, probability, quality, prediction, confidence = predict_signal(
+            X[selected_index].squeeze(),
+            threshold,
         )
 
-        sample_index = st.sidebar.slider(
-            "Select ECG sample",
-            0,
-            len(X) - 1,
-            0
-        )
-
-
-        signal = X[
-            sample_index
-        ].squeeze().astype(
-            np.float32
-        )
-
-
-        (
-            signal,
-            probability,
-            quality,
-            prediction,
-            confidence
-        ) = predict_signal(signal)
-
-
-        ground_truth = (
-            "Abnormal"
-            if int(y[sample_index]) == 1
-            else "Normal"
-        )
-
-
-        quality_text, quality_icon = (
-            quality_status(quality)
-        )
-
-
-        is_match = (
-            prediction == ground_truth
-        )
-
-
-        # ----------------------------------------------------
-        # RESULT HEADER
-        # ----------------------------------------------------
-
-        st.markdown(
-            "### 🔎 ECG Prediction"
-        )
-
+        st.markdown("### 🫀 Selected Heartbeat")
 
         c1, c2, c3, c4 = st.columns(4)
 
-
-        with c1:
-
-            icon = (
-                "🟢"
-                if prediction == "Normal"
-                else "🔴"
-            )
-
-            metric_card(
-                "PREDICTION",
-                f"{icon} {prediction}",
-                f"Ground truth: {ground_truth}"
-            )
-
-
-        with c2:
-
-            metric_card(
-                "ABNORMAL PROBABILITY",
-                f"{probability:.1%}",
-                "Model output"
-            )
-
-
-        with c3:
-
-            metric_card(
-                "MODEL CONFIDENCE",
-                f"{confidence:.1%}",
-                "Prediction certainty"
-            )
-
-
-        with c4:
-
-            metric_card(
-                "SIGNAL QUALITY",
-                f"{quality:.1%}",
-                f"{quality_icon} {quality_text}"
-            )
-
-
-        # ----------------------------------------------------
-        # SAMPLE STATUS
-        # ----------------------------------------------------
-
-        status_text = (
-            "✅ Prediction matches ground truth"
-            if is_match
-            else "⚠️ Prediction differs from ground truth"
+        c1.metric(
+            "Prediction",
+            f"{'🟢' if prediction == 'Normal' else '🔴'} {prediction}",
+            f"Ground truth: {ground_truth}",
         )
 
-
-        st.markdown(
-            f"""
-            <div class="feature-card"
-                 style="
-                 padding:15px 20px;
-                 border-radius:14px;
-                 margin:15px 0;
-                 ">
-
-                <b>📋 Test Sample #{sample_index}</b>
-
-                &nbsp; | &nbsp;
-
-                Prediction:
-                <b>{prediction}</b>
-
-                &nbsp; | &nbsp;
-
-                Ground Truth:
-                <b>{ground_truth}</b>
-
-                &nbsp; | &nbsp;
-
-                {status_text}
-
-            </div>
-            """,
-            unsafe_allow_html=True
+        c2.metric(
+            "Abnormal Probability",
+            f"{probability:.1%}",
         )
 
-
-        # ----------------------------------------------------
-        # WAVEFORM
-        # ----------------------------------------------------
-
-        st.markdown(
-            "### 📈 ECG Waveform"
+        c3.metric(
+            "Model Confidence",
+            f"{confidence:.1%}",
         )
 
+        qtext, qicon = quality_status(quality)
 
-        st.pyplot(
-            plot_ecg(
-                signal,
-                f"ECG Sample #{sample_index}"
-            ),
-            clear_figure=True
+        c4.metric(
+            "Signal Quality",
+            f"{quality:.1%}",
+            f"{qicon} {qtext}",
         )
 
+        if prediction == ground_truth:
+            st.success(
+                f"✅ Sample #{selected_index}: prediction matches the ground truth."
+            )
+        else:
+            st.warning(
+                f"⚠️ Sample #{selected_index}: prediction differs from the ground truth."
+            )
 
-        # ----------------------------------------------------
-        # NOVEL FEATURE 1
-        # ----------------------------------------------------
+        st.markdown("### 📈 ECG Waveform")
 
-        st.markdown(
-            "### ✨ Novel Feature 1 — Signal Quality–Aware Prediction"
+        st.plotly_chart(
+            make_ecg_plotly(signal),
+            use_container_width=True,
+            config={
+                "displaylogo": False,
+                "scrollZoom": True,
+            },
         )
 
+        probability_text, probability_icon = probability_status(probability)
+
+        st.progress(
+            int(np.clip(probability, 0, 1) * 100),
+        )
+
+        st.caption(
+            f"{probability_icon} {probability_text} • "
+            f"Threshold: {threshold:.2f}"
+        )
+
+        st.markdown("### ✨ Novel Features")
+
+        n1, n2 = st.columns(2)
+
+        with n1:
+            st.info(
+                "**✨ Signal Quality–Aware Prediction**\n\n"
+                "The model output is shown together with a heuristic "
+                "signal-quality score."
+            )
+
+        with n2:
+            st.info(
+                "**✨ Heartbeat-Aware Exploration**\n\n"
+                "Filter the held-out test set into Normal or Abnormal beats "
+                "and inspect them one by one."
+            )
+
+        with st.expander("🫀 ECG waveform guide"):
+            show_heartbeat_guide()
 
         st.info(
-            "The dashboard presents model confidence together "
-            "with a heuristic ECG signal-quality score based "
-            "on baseline-wander and high-frequency-noise energy."
+            interpretation(
+                probability,
+                quality,
+            )
         )
 
+    elif analysis_mode == "CSV Upload":
 
-        # ----------------------------------------------------
-        # NOVEL FEATURE 2
-        # ----------------------------------------------------
+        st.markdown("### 📤 Upload ECG CSV")
 
-        st.markdown(
-            "### ✨ Novel Feature 2 — Confidence + Quality Interpretation"
+        uploaded = st.file_uploader(
+            "Choose an ECG CSV file",
+            type=["csv"],
         )
 
-
-        interpretation_text = interpretation(
-            probability,
-            quality
-        )
-
-
-        st.success(
-            interpretation_text
-        )
-
-
-    # ========================================================
-    # CSV UPLOAD
-    # ========================================================
-
-    elif input_mode == "Upload ECG CSV":
-
-        st.markdown(
-            "### 📤 Upload ECG CSV"
-        )
-
-
-        st.write(
-            "Upload a CSV containing numeric ECG samples. "
-            "The first numeric column will be used."
-        )
-
-
-        uploaded_file = st.file_uploader(
-            "Choose ECG CSV",
-            type=["csv"]
-        )
-
-
-        if uploaded_file is None:
+        if uploaded is None:
 
             st.info(
-                "📄 No CSV selected yet."
+                "Upload a CSV containing numeric ECG samples to explore it."
             )
-
 
         else:
 
             try:
 
-                dataframe = pd.read_csv(
-                    uploaded_file
-                )
+                dataframe = pd.read_csv(uploaded)
+                numeric = dataframe.select_dtypes(include=np.number)
 
-
-                numeric_columns = dataframe.select_dtypes(
-                    include=np.number
-                )
-
-
-                if numeric_columns.empty:
+                if numeric.empty:
 
                     st.error(
-                        "❌ No numeric ECG column was found."
+                        "No numeric ECG column was found in the uploaded file."
                     )
-
 
                 else:
 
                     raw_signal = (
-                        numeric_columns
-                        .iloc[:, 0]
+                        numeric.iloc[:, 0]
                         .dropna()
-                        .to_numpy(
-                            dtype=np.float32
-                        )
+                        .to_numpy(dtype=np.float32)
                     )
-
 
                     (
                         signal,
                         probability,
                         quality,
                         prediction,
-                        confidence
+                        confidence,
                     ) = predict_signal(
-                        raw_signal
+                        raw_signal,
+                        threshold,
                     )
 
+                    c1, c2, c3, c4 = st.columns(4)
 
-                    quality_text, quality_icon = (
-                        quality_status(
-                            quality
-                        )
+                    c1.metric(
+                        "Prediction",
+                        f"{'🟢' if prediction == 'Normal' else '🔴'} {prediction}",
                     )
 
-
-                    c1, c2, c3, c4 = (
-                        st.columns(4)
+                    c2.metric(
+                        "Abnormal Probability",
+                        f"{probability:.1%}",
                     )
 
-
-                    with c1:
-
-                        icon = (
-                            "🟢"
-                            if prediction == "Normal"
-                            else "🔴"
-                        )
-
-                        metric_card(
-                            "PREDICTION",
-                            f"{icon} {prediction}",
-                            "Uploaded ECG"
-                        )
-
-
-                    with c2:
-
-                        metric_card(
-                            "ABNORMAL PROBABILITY",
-                            f"{probability:.1%}",
-                            "Model output"
-                        )
-
-
-                    with c3:
-
-                        metric_card(
-                            "MODEL CONFIDENCE",
-                            f"{confidence:.1%}",
-                            "Prediction certainty"
-                        )
-
-
-                    with c4:
-
-                        metric_card(
-                            "SIGNAL QUALITY",
-                            f"{quality:.1%}",
-                            f"{quality_icon} {quality_text}"
-                        )
-
-
-                    st.markdown(
-                        "### 📈 Uploaded ECG"
+                    c3.metric(
+                        "Model Confidence",
+                        f"{confidence:.1%}",
                     )
 
+                    qtext, qicon = quality_status(quality)
 
-                    st.pyplot(
-                        plot_ecg(
-                            signal,
-                            "Uploaded ECG — normalized to 187 samples"
-                        ),
-                        clear_figure=True
+                    c4.metric(
+                        "Signal Quality",
+                        f"{quality:.1%}",
+                        f"{qicon} {qtext}",
                     )
 
+                    st.markdown("### 📈 Uploaded ECG")
 
-                    st.markdown(
-                        "### ✨ Novel Feature 3 — User ECG Exploration"
+                    st.plotly_chart(
+                        make_ecg_plotly(signal),
+                        use_container_width=True,
+                        config={
+                            "displaylogo": False,
+                            "scrollZoom": True,
+                        },
                     )
-
 
                     st.info(
-                        "The same benchmark preprocessing and "
-                        "classification pipeline can be explored "
-                        "with a user-provided numeric ECG signal."
+                        "Uploaded signals are normalized and converted to the "
+                        "187-sample format expected by the trained CNN."
                     )
-
 
             except Exception as error:
 
                 st.error(
-                    f"❌ Could not process this CSV: {error}"
+                    f"Could not process this CSV: {error}"
                 )
-
-
-    # ========================================================
-    # NOISE STRESS TEST
-    # ========================================================
 
     else:
 
-        st.markdown(
-            "### 🧪 Noise Stress Test"
-        )
+        st.markdown("### 🌪️ Noise Stress Test")
 
-
-        st.write(
-            "Add controlled Gaussian noise to a test heartbeat "
-            "and compare signal quality and model output."
-        )
-
-
-        sample_index = st.sidebar.slider(
-            "Base ECG sample",
-            0,
-            len(X) - 1,
-            0,
-            key="noise_sample"
-        )
-
-
-        noise_level = st.sidebar.slider(
-            "Noise level",
+        noise_level = st.slider(
+            "Noise strength",
             0.00,
             1.00,
             0.15,
-            0.01
+            0.01,
         )
 
-
-        clean_signal, clean_probability, clean_quality, clean_prediction, clean_confidence = (
+        clean_signal, clean_prob, clean_quality, clean_label, clean_conf = (
             predict_signal(
-                X[sample_index].squeeze()
+                X[selected_index].squeeze(),
+                threshold,
             )
         )
 
-
         rng = np.random.default_rng(
-            42 + sample_index +
-            int(noise_level * 1000)
+            1000 + selected_index + int(noise_level * 100)
         )
-
 
         noisy_raw = (
             clean_signal
-            +
-            rng.normal(
+            + rng.normal(
                 0,
                 noise_level,
-                clean_signal.shape
+                clean_signal.shape,
             ).astype(np.float32)
         )
 
-
-        noisy_signal, noisy_probability, noisy_quality, noisy_prediction, noisy_confidence = (
+        noisy_signal, noisy_prob, noisy_quality, noisy_label, noisy_conf = (
             predict_signal(
-                noisy_raw
+                noisy_raw,
+                threshold,
             )
         )
 
-
-        st.markdown(
-            "### ✨ Novel Feature 4 — Noise Stress Test"
-        )
-
+        st.markdown("### ✨ Novel Feature — Noise Robustness Test")
 
         a, b = st.columns(2)
 
-
-        with a:
-
-            metric_card(
-                "CLEAN SIGNAL",
-                clean_prediction,
-                f"Quality {clean_quality:.1%} • Confidence {clean_confidence:.1%}"
-            )
-
-
-        with b:
-
-            metric_card(
-                "NOISY SIGNAL",
-                noisy_prediction,
-                f"Quality {noisy_quality:.1%} • Confidence {noisy_confidence:.1%}"
-            )
-
-
-        st.pyplot(
-            plot_ecg(
-                clean_signal,
-                "Clean vs Noisy ECG",
-                noisy_signal=noisy_signal
-            ),
-            clear_figure=True
+        a.metric(
+            "Clean",
+            clean_label,
+            f"Quality {clean_quality:.1%} • Confidence {clean_conf:.1%}",
         )
 
+        b.metric(
+            "Noisy",
+            noisy_label,
+            f"Quality {noisy_quality:.1%} • Confidence {noisy_conf:.1%}",
+        )
 
-        q1, q2, q3 = st.columns(3)
+        st.plotly_chart(
+            make_ecg_plotly(
+                clean_signal,
+                0,
+                187,
+                noisy_signal=None,
+            ),
+            use_container_width=True,
+            config={
+                "displaylogo": False,
+                "scrollZoom": True,
+            },
+        )
 
+        n1, n2, n3 = st.columns(3)
 
-        with q1:
+        n1.metric(
+            "Noise level",
+            f"{noise_level:.2f}",
+        )
 
-            metric_card(
-                "NOISE LEVEL",
-                f"{noise_level:.2f}",
-                "Controlled Gaussian noise"
-            )
+        n2.metric(
+            "Quality change",
+            f"{noisy_quality - clean_quality:+.1%}",
+        )
 
-
-        with q2:
-
-            metric_card(
-                "QUALITY CHANGE",
-                f"{noisy_quality - clean_quality:+.1%}"
-            )
-
-
-        with q3:
-
-            metric_card(
-                "CONFIDENCE CHANGE",
-                f"{noisy_confidence - clean_confidence:+.1%}"
-            )
-
+        n3.metric(
+            "Confidence change",
+            f"{noisy_conf - clean_conf:+.1%}",
+        )
 
         st.info(
-            "This is a robustness experiment. "
-            "It does not represent clinical performance "
-            "under real-world noise."
+            "This is a robustness experiment, not a clinical noise-performance test."
         )
 
 
 # ============================================================
-# TAB 2 — MODEL PERFORMANCE
+# TAB 2 — INTERACTIVE WAVEFORM TELEMETRY
 # ============================================================
 
 with tab2:
 
-    st.markdown(
-        "### 📊 Model Performance Center"
-    )
-
+    st.markdown("## 📈 Interactive Waveform Telemetry")
 
     st.caption(
-        "Metrics calculated on the held-out test records "
-        "used by the benchmark."
+        "Click and drag to pan, use the mouse wheel to zoom, or use the "
+        "Plotly toolbar for box zoom and reset."
     )
 
-
-    m1, m2, m3, m4, m5 = (
-        st.columns(5)
+    telemetry_index = st.selectbox(
+        "🫀 Select heartbeat",
+        options=available.tolist(),
+        index=selected_position,
+        format_func=lambda idx: (
+            f"Sample #{idx} — "
+            f"{'Abnormal' if int(y[idx]) else 'Normal'}"
+        ),
     )
 
+    telemetry_signal, telemetry_prob, telemetry_quality, telemetry_label, telemetry_conf = (
+        predict_signal(
+            X[telemetry_index].squeeze(),
+            threshold,
+        )
+    )
 
-    with m1:
+    preset = st.selectbox(
+        "🔍 View",
+        [
+            "Full heartbeat",
+            "Center reference",
+            "Middle section",
+        ],
+    )
 
-        metric_card(
-            "ACCURACY",
-            f"{metrics['accuracy']:.3f}"
+    if preset == "Full heartbeat":
+        view_start, view_end = 0, 187
+    elif preset == "Center reference":
+        view_start, view_end = 50, 137
+    else:
+        view_start, view_end = 47, 140
+
+    custom = st.checkbox(
+        "Custom view",
+        False,
+    )
+
+    if custom:
+        s1, s2 = st.columns(2)
+
+        view_start = s1.slider(
+            "Start",
+            0,
+            186,
+            view_start,
         )
 
-
-    with m2:
-
-        metric_card(
-            "PRECISION",
-            f"{metrics['precision']:.3f}"
+        view_end = s2.slider(
+            "End",
+            view_start + 1,
+            187,
+            max(view_start + 1, view_end),
         )
 
-
-    with m3:
-
-        metric_card(
-            "RECALL",
-            f"{metrics['recall']:.3f}"
-        )
-
-
-    with m4:
-
-        metric_card(
-            "F1 SCORE",
-            f"{metrics['f1']:.3f}"
-        )
-
-
-    with m5:
-
-        metric_card(
-            "ROC-AUC",
-            f"{metrics['roc_auc']:.3f}"
-        )
-
-
-    # --------------------------------------------------------
-    # CONFUSION MATRIX
-    # --------------------------------------------------------
-
-    st.markdown(
-        "### 🧩 Confusion Matrix"
+    show_smooth = st.checkbox(
+        "Show smoothed trend",
+        True,
     )
 
-
-    confusion_matrix = np.array(
-        metrics["confusion_matrix"]
+    show_reference = st.checkbox(
+        "Show reference position",
+        True,
     )
 
-
-    fig, ax = plt.subplots(
-        figsize=(6, 5)
+    st.plotly_chart(
+        make_ecg_plotly(
+            telemetry_signal,
+            view_start,
+            view_end,
+            show_smooth=show_smooth,
+            show_reference=show_reference,
+        ),
+        use_container_width=True,
+        config={
+            "displaylogo": False,
+            "scrollZoom": True,
+        },
     )
 
+    t1, t2, t3, t4 = st.columns(4)
 
-    image = ax.imshow(
-        confusion_matrix
+    t1.metric(
+        "Prediction",
+        telemetry_label,
     )
 
-
-    ax.set_xticks(
-        [0, 1],
-        ["Normal", "Abnormal"]
+    t2.metric(
+        "Abnormal probability",
+        f"{telemetry_prob:.1%}",
     )
 
-
-    ax.set_yticks(
-        [0, 1],
-        ["Normal", "Abnormal"]
+    t3.metric(
+        "Signal quality",
+        f"{telemetry_quality:.1%}",
     )
 
-
-    ax.set_xlabel(
-        "Predicted"
+    t4.metric(
+        "Confidence",
+        f"{telemetry_conf:.1%}",
     )
 
+    st.markdown("### 🫀 Heartbeat Navigation")
 
-    ax.set_ylabel(
-        "Actual"
-    )
+    positions = available.tolist()
+    current_position = positions.index(telemetry_index)
 
+    n1, n2, n3 = st.columns(3)
 
-    ax.set_title(
-        "Confusion Matrix",
-        fontweight="bold"
-    )
-
-
-    for row in range(2):
-
-        for col in range(2):
-
-            ax.text(
-                col,
-                row,
-                int(
-                    confusion_matrix[
-                        row,
-                        col
-                    ]
-                ),
-                ha="center",
-                va="center",
-                fontsize=15,
-                fontweight="bold"
+    with n1:
+        if st.button(
+            "⬅️ Previous Beat",
+            disabled=current_position == 0,
+            use_container_width=True,
+        ):
+            st.session_state.telemetry_index = int(
+                positions[current_position - 1]
             )
+            st.rerun()
 
-
-    fig.colorbar(
-        image,
-        ax=ax
-    )
-
-
-    fig.tight_layout()
-
-
-    st.pyplot(
-        fig,
-        clear_figure=True
-    )
-
-
-    # --------------------------------------------------------
-    # REPORT + EXPLANATION
-    # --------------------------------------------------------
-
-    col1, col2 = st.columns(2)
-
-
-    with col1:
-
-        st.markdown(
-            "### 📋 Classification Report"
+    with n2:
+        st.metric(
+            "Current beat",
+            f"#{telemetry_index}",
         )
 
+    with n3:
+        if st.button(
+            "Next Beat ➡️",
+            disabled=current_position == len(positions) - 1,
+            use_container_width=True,
+        ):
+            st.session_state.telemetry_index = int(
+                positions[current_position + 1]
+            )
+            st.rerun()
 
-        st.code(
-            metrics[
-                "classification_report"
-            ]
-        )
-
-
-    with col2:
-
-        st.markdown(
-            "### 🧠 Metric Guide"
-        )
-
-
-        st.markdown(
-            """
-            **Accuracy**  
-            Overall fraction of correct predictions.
-
-            **Precision**  
-            How often predicted abnormal beats were actually abnormal.
-
-            **Recall**  
-            How many abnormal beats were detected.
-
-            **F1 Score**  
-            Balance between precision and recall.
-
-            **ROC-AUC**  
-            Measures ranking performance across classification thresholds.
-            """
+    with st.expander("🫀 What can be explored here?"):
+        st.write(
+            "Use the sample selector and navigation buttons to move through the "
+            "selected Normal/Abnormal heartbeat group. The waveform can be "
+            "zoomed and panned directly."
         )
 
 
 # ============================================================
-# TAB 3 — ABOUT
+# TAB 3 — PERFORMANCE
 # ============================================================
 
 with tab3:
 
-    st.markdown(
-        "### ℹ️ About This Project"
+    st.markdown("## 📊 Accuracy & Scorecard")
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+
+    m1.metric("Accuracy", f"{metrics['accuracy']:.3f}")
+    m2.metric("Precision", f"{metrics['precision']:.3f}")
+    m3.metric("Recall", f"{metrics['recall']:.3f}")
+    m4.metric("F1 Score", f"{metrics['f1']:.3f}")
+    m5.metric("ROC-AUC", f"{metrics['roc_auc']:.3f}")
+
+    if stored_prob is not None and len(stored_prob) == len(y):
+
+        c1, c2 = st.columns(2)
+
+        with c1:
+
+            roc_fig = make_roc_plot()
+
+            if roc_fig is not None:
+                st.pyplot(
+                    roc_fig,
+                    clear_figure=True,
+                )
+
+        with c2:
+
+            prob_fig = make_probability_plot()
+
+            if prob_fig is not None:
+                st.pyplot(
+                    prob_fig,
+                    clear_figure=True,
+                )
+
+    st.markdown("### 🧩 Confusion Matrix")
+
+    cm = make_confusion_matrix()
+
+    matrix_mode = st.radio(
+        "Display",
+        [
+            "Absolute counts",
+            "Normalized by actual class",
+        ],
+        horizontal=True,
     )
 
+    display_cm = cm.astype(float)
 
-    st.markdown(
+    if matrix_mode == "Normalized by actual class":
+
+        row_sums = display_cm.sum(
+            axis=1,
+            keepdims=True,
+        )
+
+        display_cm = np.divide(
+            display_cm,
+            row_sums,
+            out=np.zeros_like(display_cm),
+            where=row_sums != 0,
+        ) * 100
+
+    fig, ax = plt.subplots(
+        figsize=(6.5, 5),
+    )
+
+    image = ax.imshow(
+        display_cm,
+    )
+
+    ax.set_xticks(
+        [0, 1],
+        ["Normal", "Abnormal"],
+    )
+
+    ax.set_yticks(
+        [0, 1],
+        ["Normal", "Abnormal"],
+    )
+
+    ax.set_xlabel("Predicted")
+    ax.set_ylabel("Actual")
+    ax.set_title(
+        "Confusion Matrix",
+        fontweight="bold",
+    )
+
+    for r in range(2):
+        for c in range(2):
+
+            value = display_cm[r, c]
+
+            text = (
+                f"{int(value)}"
+                if matrix_mode == "Absolute counts"
+                else f"{value:.1f}%"
+            )
+
+            ax.text(
+                c,
+                r,
+                text,
+                ha="center",
+                va="center",
+                fontweight="bold",
+            )
+
+    fig.colorbar(
+        image,
+        ax=ax,
+    )
+
+    fig.tight_layout()
+
+    st.pyplot(
+        fig,
+        clear_figure=True,
+    )
+
+    with st.expander("📋 Classification Report"):
+        st.code(
+            metrics["classification_report"]
+        )
+
+
+# ============================================================
+# TAB 4 — PROJECT GUIDE
+# ============================================================
+
+with tab4:
+
+    st.markdown("## ℹ️ Project Guide")
+
+    p1, p2, p3, p4, p5, p6 = st.columns(6)
+
+    p1.info("**1. Dataset**\n\nMIT-BIH ECG records")
+    p2.info("**2. Beat Extraction**\n\n187-sample heartbeat")
+    p3.info("**3. Normalize**\n\nPer-beat normalization")
+    p4.info("**4. CNN**\n\n1D convolutional model")
+    p5.info("**5. Predict**\n\nNormal / Abnormal")
+    p6.info("**6. Analyze**\n\nQuality + telemetry")
+
+    st.markdown("### ✨ Dashboard Features")
+
+    f1, f2 = st.columns(2)
+
+    f1.markdown(
         """
-        ## 🫀 ECG AI Analyzer
+        **🫀 Heartbeat Explorer**
 
-        This project is an AI-based research/educational benchmark
-        for binary ECG abnormality classification.
+        Select Normal or Abnormal test beats and move through them one by one.
 
-        ### Dataset
+        **📈 Interactive Waveform Telemetry**
 
-        **MIT-BIH Arrhythmia Database**
-
-        ### AI Model
-
-        **1D Convolutional Neural Network (1D CNN)**
-
-        ### Input
-
-        **187 ECG samples per heartbeat**
-
-        ### Classes
-
-        🟢 Normal  
-        🔴 Abnormal
-
-        ### Implemented Dashboard Features
-
-        - 🔎 ECG test-sample explorer
-        - 📈 ECG waveform visualization
-        - ✨ Signal-quality-aware prediction
-        - ✨ Confidence + quality interpretation
-        - 📤 ECG CSV exploration
-        - 🧪 Noise stress testing
-        - 📊 Model performance center
-        - 🧩 Confusion matrix
-        - 📋 Classification report
-        - 🌗 Light / Dark theme
-        - 🎨 User-friendly dashboard design
+        Zoom, pan, change the view window and inspect the selected heartbeat.
         """
     )
 
+    f2.markdown(
+        """
+        **🔬 Signal Quality Awareness**
+
+        Display the model prediction together with a heuristic signal-quality score.
+
+        **🌪️ Robustness Test**
+
+        Add controlled noise and compare model behavior.
+        """
+    )
+
+    with st.expander("🫀 ECG basics"):
+        show_heartbeat_guide()
 
     st.warning(
-        "⚠️ This application is not a medical device "
-        "and must not be used for diagnosis or medical decisions."
+        "⚠️ This application is a research/educational benchmark, "
+        "not a clinical diagnosis system."
     )
 
 
@@ -1216,9 +1100,6 @@ with tab3:
 
 st.divider()
 
-
 st.caption(
-    "🫀 ECG AI Analyzer • MIT-BIH benchmark • "
-    "Results depend on dataset split, preprocessing, "
-    "random seed, model and hardware."
+    "🫀 ECG AI Analyzer • MIT-BIH benchmark • Research/educational use only"
 )
