@@ -75,8 +75,12 @@ def extract_beats(record_ids=None, window=187, max_per_class=15000, seed=42):
     rng.shuffle(selected)
 
     X, y, groups = X[selected], y[selected], groups[selected]
-
+   
     # Per-beat normalization keeps morphology while reducing amplitude offsets.
+    print("DEBUG X shape:", X.shape)
+    print("DEBUG X dtype:", X.dtype)
+    print("DEBUG y shape:", y.shape)
+    print("DEBUG number of beats:", len(X))
     X = X - X.mean(axis=1, keepdims=True)
     X = X / (X.std(axis=1, keepdims=True) + 1e-7)
     return X[..., None], y, groups
