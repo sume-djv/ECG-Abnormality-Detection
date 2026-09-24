@@ -10,6 +10,7 @@ import tensorflow as tf
 
 from src.utils import signal_quality_score, interpretation
 
+
 # ============================================================
 # CONFIG
 # ============================================================
@@ -278,7 +279,7 @@ def make_ecg_plotly(
             rangeslider=dict(visible=True),
         ),
         yaxis=dict(gridcolor=grid_color),
-        legend=dict(orientation="h"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         margin=dict(l=30, r=20, t=55, b=30),
         height=470,
     )
@@ -523,6 +524,7 @@ with tab1:
                 "displaylogo": False,
                 "scrollZoom": True,
             },
+                    key="heartbeat_waveform",
         )
 
         probability_text, probability_icon = probability_status(probability)
@@ -668,6 +670,7 @@ with tab1:
             1.00,
             0.15,
             0.01,
+                    key="csv_waveform",
         )
 
         clean_signal, clean_prob, clean_quality, clean_label, clean_conf = (
@@ -725,6 +728,7 @@ with tab1:
                 "displaylogo": False,
                 "scrollZoom": True,
             },
+                    key="telemetry_waveform",
         )
 
         n1, n2, n3 = st.columns(3)
