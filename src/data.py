@@ -47,13 +47,13 @@ def extract_beats(record_ids=None, window=187, max_per_class=15000, seed=42):
         for sample, symbol in zip(ann.sample, ann.symbol):
             if symbol not in VALID_SYMBOLS:
                 continue
-            left, right = sample - half, sample + half
-            if left < 0 or right > len(signal):
-                continue
+            left, right = sample - half, sample + half + 1
+if left < 0 or right > len(signal):
+    continue
 
-            beat = signal[left:right]
-            if len(beat) != window:
-                continue
+beat = signal[left:right]
+if len(beat) != window:
+    continue
 
             label = 0 if symbol in NORMAL_SYMBOLS else 1
             X.append(beat)
