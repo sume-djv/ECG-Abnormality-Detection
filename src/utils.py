@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.integrate import trapezoid
 from scipy.signal import welch
 
 def signal_quality_score(x, fs=360):
@@ -12,9 +13,9 @@ def signal_quality_score(x, fs=360):
         return 0.0
 
     f, pxx = welch(x, fs=fs, nperseg=min(128, len(x)))
-    total = np.trapezoid(pxx, f) + 1e-12
-    baseline = np.trapezoid(pxx[f < 0.5], f[f < 0.5])
-    high = np.trapezoid(pxx[f > 40], f[f > 40])
+    total = trapezoid(pxx, f) + 1e-12
+    baseline = trapezoid(pxx[f < 0.5], f[f < 0.5])
+    high = trapezoid(pxx[f > 40], f[f > 40])
 
     baseline_ratio = baseline / total
     high_ratio = high / total
